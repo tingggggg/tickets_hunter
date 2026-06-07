@@ -169,6 +169,87 @@ tickets_hunter/
 
 ---
 
+## 🧪 Docker Dev 三段練習控制（Fork-only 擴充）
+
+> Fork 本專案後新增的本地開發流程；不影響上游發行版。
+> 詳見 `Dockerfile` / `docker-compose.yml` / `tools/find_kktix_practice_events.py`。
+
+### 🛟 三段安全分級
+
+KKTIX 的 `nodriver_kktix_confirm_order_button` 內建 dry-run guard，由環境變數
+`HUNTER_DRY_RUN` 切換。每個層級都會自動截全頁圖到 `./artifacts/` 作為證據。
+
+| `HUNTER_DRY_RUN` | 行為 | KKTIX 端影響 | 適用 |
+|---|---|---|---|
+| `1`（compose 預設） | 走完報名表 → 到達 reserved 頁 → **不點 confirm** | 座位臨時 hold 10–15 分鐘自動釋放 | 日常練習 |
+| `2` | 走完報名表 → 點 confirm → 進入付款選擇頁 → 退出 | 訂單進入「待付款」狀態（hold 較久） | 練到底但不付款 |
+| 空 / unset | 完整自動化 | 真實訂單建立 | 正式搶票 |
+
+兩段 dry-run 都會在 log 印出單行證據：
+```
+[PROOF] level=L1 reg=156375090 button_found=True button_text='Confirm Form' \
+        screenshot=/app/artifacts/kktix_L1_20260607-234602_156375090.png
+[DRY-RUN L1] reached KKTIX confirm button — NOT clicking.
+```
+
+截圖直接落在 host 的 `./artifacts/`（compose bind mount），打開即可確認 bot
+真的走到該停的位置。
+
+### 🚀 標準操作
+
+```bash
+# 一次性建 image（約 5-10 分鐘）
+docker compose build
+
+# 啟動容器（settings UI + noVNC + X stack 常駐）
+docker compose up -d
+
+# 設定（瀏覽器內填活動 URL / 帳號 / 關鍵字 / 防呆問答答案池）
+open http://localhost:16888/settings.html
+
+# 觀察 headed Chrome（第一次登入需要在此手動完成，之後 cookie 留在持久 profile）
+open http://localhost:6080/vnc.html
+
+# 跑 L1 練習（compose 預設 HUNTER_DRY_RUN=1）
+docker compose exec hunter sh -c 'cd /app/src && python nodriver_tixcraft.py'
+
+# 跑 L2（單次覆蓋 env）
+docker compose exec -e HUNTER_DRY_RUN=2 hunter \
+    sh -c 'cd /app/src && python nodriver_tixcraft.py'
+
+# 正式搶票（清空 env）
+docker compose exec -e HUNTER_DRY_RUN= hunter \
+    sh -c 'cd /app/src && python nodriver_tixcraft.py'
+```
+
+### 🍪 持久 Chrome Profile
+
+`HUNTER_PERSIST_PROFILE=1`（預設開啟）讓 zendriver 共用一個固定的
+`user_data_dir`（落在 `hunter_userdata` named volume），登入過的 cookies 跨
+容器重建仍保留。第一次跑會看到登入頁，登入後 cookie 寫入 profile；之後重啟
+直接跳到報名表，省下每次手動登入。
+
+清空 profile（強制下次重新登入）：
+```bash
+docker compose exec hunter rm -rf /app/src/userdata/chrome_profile/*
+```
+
+### 🔍 找適合練習的 KKTIX 活動
+
+```bash
+# 列出近期可練習的活動候選
+docker compose exec hunter python /app/tools/find_kktix_practice_events.py
+
+# 深度檢視單一活動（票種 / CAPTCHA / 防呆問答 / 設定 checklist）
+docker compose exec hunter python /app/tools/find_kktix_practice_events.py \
+    --url https://<community>.kktix.cc/events/<slug>
+```
+
+⚠️ 請只用免費 / 冷門活動練習。熱門演唱會即使 dry-run 也會佔用真實粉絲的搶票
+資源，違反本專案的 LEGAL_NOTICE 精神。
+
+---
+
 ## ⭐ Star History
 <a href="https://www.star-history.com/#bouob/tickets_hunter&type=date&legend=top-left">
   <picture>
