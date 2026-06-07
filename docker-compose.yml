@@ -1,0 +1,57 @@
+# =============================================================================
+# Tickets Hunter — development stack
+#
+#   docker compose up -d              # boots settings UI on http://localhost:16888
+#   open http://localhost:6080/       # watch the headed browser via noVNC
+#   docker compose exec hunter bash   # shell inside the container
+#
+# Source is bind-mounted from the host, so edits in src/ take effect on next run
+# without rebuilding the image. Chrome-for-Testing downloads (~150MB) are kept
+# in a named volume so they survive container restarts.
+# =============================================================================
+services:
+  hunter:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: tickets_hunter:dev
+    container_name: tickets_hunter
+    # zendriver / Chromium need a larger shm than the Docker 64MB default,
+    # otherwise the renderer process crashes intermittently.
+    shm_size: "2gb"
+    ports:
+      - "16888:16888"   # settings UI (tornado)
+      - "6080:6080"     # noVNC web client
+      - "5900:5900"     # raw VNC (optional, for native VNC clients)
+    environment:
+      TZ: Asia/Taipei
+      DISPLAY: ":99"
+      SCREEN_GEOMETRY: "1440x900x24"
+      # Set a password to protect the VNC session; leave empty for no auth.
+      VNC_PASSWORD: ""
+      # Level-1 practice mode for KKTIX: bot walks the entire flow but
+      # halts at the final "確認訂單" click. Set to "1" to enable, leave
+      # empty/unset for real ticket grabbing.
+      HUNTER_DRY_RUN: "${HUNTER_DRY_RUN:-1}"
+    volumes:
+      # Live source mount — edit on host, run inside container.
+      - ./src:/app/src
+      - ./guide:/app/guide:ro
+      - ./docs:/app/docs:ro
+      # Persist Chrome-for-Testing downloads + user config so re-creating the
+      # container doesn't re-download Chrome or wipe your settings.json.
+      - hunter_webdriver:/app/src/webdriver
+      - hunter_userdata:/app/src/userdata
+    # Default mode = launch the settings web UI. Override with:
+    #   docker compose run --rm hunter run    # main hunting loop
+    #   docker compose run --rm hunter shell  # interactive bash
+    command: ["settings"]
+    # Dev mode: don't auto-restart on crash — we want crashes to be visible,
+    # not hidden behind a restart loop. Set to "unless-stopped" for production.
+    restart: "no"
+    stdin_open: true
+    tty: true
+
+volumes:
+  hunter_webdriver:
+  hunter_userdata:

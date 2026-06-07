@@ -1,0 +1,39 @@
+# VCS
+.git
+.gitignore
+.github
+
+# Editor / OS
+.vscode
+.idea
+.DS_Store
+*.swp
+
+# Python build artefacts
+__pycache__
+*.py[cod]
+*.egg-info
+.pytest_cache
+.mypy_cache
+.ruff_cache
+.venv
+venv
+
+# Build output
+build
+dist
+*.spec.bak
+
+# Chrome / driver downloads — let the app fetch fresh in the container
+src/webdriver
+src/userdata
+
+# Local docs / community files not needed at runtime
+CHANGELOG.md
+CONTRIBUTING.md
+LEGAL_NOTICE.md
+
+# Docker itself (docker/ kept — entrypoint.sh lives there)
+Dockerfile
+docker-compose.yml
+.dockerignore
