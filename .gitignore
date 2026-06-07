@@ -21,6 +21,10 @@ src/webdriver/*/data/status.json
 chrome_profile/
 user_data/
 
+# Dry-run proof artifacts (screenshots, HTML snapshots) — keep dir, not contents
+/artifacts/*
+!/artifacts/.gitkeep
+
 # WebDriver executables
 /src/webdriver/*.exe
 /src/webdriver/chromedriver*

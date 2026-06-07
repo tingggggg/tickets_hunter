@@ -980,7 +980,28 @@ def get_extension_config(config_dict, args=None):
         raise FileNotFoundError("Could not find or download Chrome browser")
 
     # Normal mode: auto-detect (host=None, port=None) to let NoDriver start the browser
-    conf = Config(browser_args=browser_args, sandbox=sandbox, headless=config_dict["advanced"]["headless"], browser_executable_path=chrome_path)
+    #
+    # HUNTER_PERSIST_PROFILE=1 → reuse a persistent Chrome profile dir so
+    # cookies/session/localStorage survive between runs. Pair with a Docker
+    # named volume (e.g. hunter_userdata) so the profile survives container
+    # recreation too. Default off so existing single-run behaviour is unchanged.
+    user_data_dir = None
+    if os.getenv("HUNTER_PERSIST_PROFILE", "").strip().lower() in ("1", "true", "yes", "on"):
+        profile_root = os.getenv(
+            "HUNTER_PROFILE_DIR",
+            os.path.join(util.get_app_root(), "userdata", "chrome_profile"),
+        )
+        os.makedirs(profile_root, exist_ok=True)
+        user_data_dir = profile_root
+        print(f"[PROFILE] reusing persistent Chrome profile: {profile_root}")
+
+    conf = Config(
+        user_data_dir=user_data_dir,
+        browser_args=browser_args,
+        sandbox=sandbox,
+        headless=config_dict["advanced"]["headless"],
+        browser_executable_path=chrome_path,
+    )
     return conf
 
 def nodriver_overwrite_prefs(conf):

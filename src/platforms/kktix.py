@@ -2291,6 +2291,70 @@ async def nodriver_kktix_booking_main(tab, config_dict):
 
     return ret
 
+async def _capture_dry_run_proof(tab, level: str) -> dict:
+    """
+    Save evidence that bot reached the KKTIX confirm step:
+
+      1. Full-page screenshot → /app/artifacts/kktix_L{level}_<ts>_<regid>.png
+      2. DOM assertion — does any visible button text match a confirm keyword?
+
+    Both are best-effort: failures are logged but do not block the dry-run flow.
+    Returns a dict the caller can print for one-line evidence-of-arrival.
+    """
+    proof = {"level": level, "screenshot": None, "button_found": None,
+             "button_text": None, "url": None, "reg_id": None}
+    try:
+        url = await tab.evaluate("location.href")
+        proof["url"] = url
+        # Reg ID is the digits-then-hex segment between /registrations/ and the
+        # next slash, e.g. /registrations/156374968-<hex>/...
+        import re
+        m = re.search(r"/registrations/(\d+)-", url or "")
+        if m:
+            proof["reg_id"] = m.group(1)
+    except Exception:
+        pass
+
+    # DOM assertion — light version of the keyword scan (read-only).
+    try:
+        assertion = await tab.evaluate(r"""
+        (() => {
+          const KW = ['Confirm Form', '確認訂單', '送出訂單', '確認付款',
+                      '前往付款', '立即購買', '下一步', '送出', '確認',
+                      'Confirm', 'Submit', 'Next', 'Pay'];
+          const NEG = ['Cancel', 'Back', '取消', '上一步'];
+          for (const el of document.querySelectorAll('a, button, input[type="submit"]')) {
+            const t = ((el.innerText || el.value || '') + '').trim();
+            if (!t || t.length > 30) continue;
+            if (NEG.some(n => t.includes(n))) continue;
+            if (!KW.some(k => t.includes(k))) continue;
+            const r = el.getBoundingClientRect();
+            if (r.width === 0 || r.height === 0) continue;
+            return { found: true, text: t };
+          }
+          return { found: false };
+        })()
+        """)
+        if isinstance(assertion, dict):
+            proof["button_found"] = assertion.get("found", False)
+            proof["button_text"] = assertion.get("text")
+    except Exception as exc:
+        proof["assertion_error"] = str(exc)
+
+    # Screenshot — saved to bind-mounted /app/artifacts/ so host sees it.
+    try:
+        os.makedirs("/app/artifacts", exist_ok=True)
+        ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+        rid = proof["reg_id"] or "noid"
+        fn = f"/app/artifacts/kktix_L{level}_{ts}_{rid}.png"
+        saved = await tab.save_screenshot(fn, format="png", full_page=True)
+        proof["screenshot"] = saved or fn
+    except Exception as exc:
+        proof["screenshot_error"] = str(exc)
+
+    return proof
+
+
 async def nodriver_kktix_confirm_order_button(tab, config_dict):
     """
     KKTIX 訂單確認按鈕自動點擊功能
@@ -2299,28 +2363,150 @@ async def nodriver_kktix_confirm_order_button(tab, config_dict):
     debug = util.create_debug_logger(config_dict)
     ret = False
 
-    try:
-        # 尋找訂單確認按鈕: div.form-actions a.btn-primary
-        confirm_button = await tab.query_selector('div.form-actions a.btn-primary')
-        if confirm_button:
-            # 檢查按鈕是否可點擊
-            is_enabled = await tab.evaluate('''
-                (button) => {
-                    return button && !button.disabled && button.offsetParent !== null;
-                }
-            ''', confirm_button)
+    # ── DRY-RUN GUARD (tiered) ──────────────────────────────────────────
+    # HUNTER_DRY_RUN levels:
+    #   "1"  Level-1: BLOCK this click. Bot stops at /registrations/<id>
+    #        reserved page. KKTIX holds the seat ~10-15 min then releases.
+    #   "2"  Level-2: ALLOW this click. Bot navigates one step further to
+    #        the payment-selection page, then exits. Bot has no payment
+    #        automation so it never enters card/ATM details. KKTIX may keep
+    #        the order in "awaiting payment" state longer than L1 (often
+    #        until the payment-method-specific deadline, e.g. ATM 1-3 days).
+    #   ""   off: full automation. The click commits the order on KKTIX.
+    # Backwards-compat: "true"/"yes"/"on" all map to Level-1.
+    # ────────────────────────────────────────────────────────────────────
+    dry_run_level = os.getenv("HUNTER_DRY_RUN", "").strip().lower()
+    is_l1 = dry_run_level in ("1", "true", "yes", "on")
+    is_l2 = dry_run_level == "2"
 
-            if is_enabled:
-                await confirm_button.click()
-                ret = True
-                debug.log("KKTIX 訂單確認按鈕已點擊")
-            else:
-                debug.log("KKTIX 訂單確認按鈕存在但不可點擊")
+    # Capture proof-of-arrival BEFORE doing anything — works for L1 & L2.
+    # Wait a moment so AngularJS renders the action area.
+    if is_l1 or is_l2:
+        await asyncio.sleep(1.5)
+        proof = await _capture_dry_run_proof(tab, "1" if is_l1 else "2")
+        # Single-line summary for log greppability
+        print(f"[PROOF] level=L{proof['level']} reg={proof['reg_id']} "
+              f"button_found={proof['button_found']} "
+              f"button_text={proof['button_text']!r} "
+              f"screenshot={proof['screenshot']}")
+
+    if is_l1:
+        msg = "[DRY-RUN L1] reached KKTIX confirm button — NOT clicking."
+        debug.log(msg)
+        print(msg)
+        # Return True so the surrounding state machine treats it as success
+        # and stops retrying. The order is NOT placed.
+        return True
+    if is_l2:
+        msg = ("[DRY-RUN L2] allowing confirm click → page will advance to "
+               "payment-selection. Bot has no payment automation; manual "
+               "interaction required to actually pay. Going through with click.")
+        debug.log(msg)
+        print(msg)
+        # fall through to the real click below
+
+    # Give Angular time to render the action buttons on the reserved page.
+    # Without this, the scanner runs against an empty/partial DOM and MISSes.
+    await asyncio.sleep(1.5)
+
+    try:
+        # Keyword-scored JS search instead of a fixed CSS selector. KKTIX's
+        # button markup varies between event types / template versions, so
+        # `div.form-actions a.btn-primary` misses on many concerts. We score
+        # candidates by text-content keyword priority and structural hints,
+        # then click the highest-scoring visible & enabled element.
+        #
+        # Scoring rules:
+        #   +10 * (priority rank)  — earlier in POSITIVE list = stronger match
+        #   +5                     — element has .btn-primary class
+        #   +3                     — element sits inside .form-actions / .actions
+        #   reject                  — any NEGATIVE keyword in text (cancel/上一步)
+        #   reject                  — disabled / 0×0 bbox / display:none
+        click_result = await tab.evaluate(r"""
+        (() => {
+          // Most specific phrases first — they win the score tiebreaker.
+          const POSITIVE = [
+            // Chinese — full phrases
+            '確認訂單', '送出訂單', '確認付款', '前往付款', '立即購買',
+            // English — full phrases (KKLIVE/international events default to EN)
+            'Confirm Form', 'Pay Now', 'Place Order', 'Submit Order',
+            // Chinese — single verbs
+            '下一步', '送出', '確認', '繼續',
+            // English — single verbs
+            'Confirm', 'Submit', 'Next', 'Continue', 'Pay',
+          ];
+          const NEGATIVE = [
+            '上一步', '取消', '返回', '回上頁', '放棄',
+            'Cancel', 'Back', 'Discard', 'Close',
+          ];
+          const visible = (el) => {
+            if (el.disabled) return false;
+            const r = el.getBoundingClientRect();
+            if (r.width === 0 || r.height === 0) return false;
+            const cs = getComputedStyle(el);
+            if (cs.display === 'none' || cs.visibility === 'hidden') return false;
+            return true;
+          };
+          const cands = [...document.querySelectorAll('a, button, input[type="submit"], input[type="button"]')];
+          let best = null, bestScore = -1, bestText = '', bestTag = '';
+          for (const el of cands) {
+            const t = ((el.innerText || el.value || '') + '').trim();
+            if (!t || t.length > 30) continue;
+            if (NEGATIVE.some(n => t.includes(n))) continue;
+            const idx = POSITIVE.findIndex(p => t.includes(p));
+            if (idx < 0) continue;
+            if (!visible(el)) continue;
+            let score = (POSITIVE.length - idx) * 10;
+            if (el.classList.contains('btn-primary')) score += 5;
+            if (el.closest('div.form-actions, .form-actions, .actions, .register-new-next-button-area')) score += 3;
+            if (score > bestScore) {
+              best = el; bestScore = score; bestText = t; bestTag = el.tagName.toLowerCase();
+            }
+          }
+          if (!best) {
+            // Dump every visible clickable text so we can discover the real
+            // wording in the L2-MISS log and add it to POSITIVE next time.
+            const all_visible = cands
+              .filter(visible)
+              .map(el => {
+                const t = ((el.innerText || el.value || '') + '').trim();
+                return t ? `${el.tagName.toLowerCase()}:"${t.slice(0,30)}"` : null;
+              })
+              .filter(Boolean)
+              .slice(0, 20);
+            return { ok: false,
+                     reason: 'no candidate matched POSITIVE keywords',
+                     visible_buttons: all_visible };
+          }
+          try {
+            best.scrollIntoView({ block: 'center', behavior: 'instant' });
+            best.click();
+            return { ok: true, text: bestText, score: bestScore, tag: bestTag };
+          } catch (e) {
+            return { ok: false, reason: 'click threw: ' + String(e), text: bestText };
+          }
+        })()
+        """)
+
+        if isinstance(click_result, dict) and click_result.get('ok'):
+            ret = True
+            msg = (f"KKTIX 訂單確認按鈕已點擊 "
+                   f"(text='{click_result.get('text')}', "
+                   f"score={click_result.get('score')}, "
+                   f"tag={click_result.get('tag')})")
+            debug.log(msg); print(f"[L2-CLICK] {msg}")
         else:
-            debug.log("未找到 KKTIX 訂單確認按鈕")
+            reason = (click_result.get('reason') if isinstance(click_result, dict)
+                      else 'evaluate returned non-dict')
+            msg = f"未找到 KKTIX 訂單確認按鈕: {reason}"
+            debug.log(msg); print(f"[L2-MISS] {msg}")
+            if isinstance(click_result, dict) and click_result.get('visible_buttons'):
+                vb = click_result['visible_buttons']
+                print(f"[L2-MISS] visible clickables on page ({len(vb)}): {vb}")
 
     except Exception as exc:
-        debug.log(f"KKTIX 訂單確認按鈕點擊失敗: {exc}")
+        msg = f"KKTIX 訂單確認按鈕點擊失敗: {exc}"
+        debug.log(msg); print(f"[L2-ERROR] {msg}")
 
     return ret
 

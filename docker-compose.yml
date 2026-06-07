@@ -29,15 +29,25 @@ services:
       SCREEN_GEOMETRY: "1440x900x24"
       # Set a password to protect the VNC session; leave empty for no auth.
       VNC_PASSWORD: ""
-      # Level-1 practice mode for KKTIX: bot walks the entire flow but
-      # halts at the final "確認訂單" click. Set to "1" to enable, leave
-      # empty/unset for real ticket grabbing.
+      # KKTIX dry-run practice mode. Tiered values:
+      #   "1" Level-1: stop at reserved page (no click on confirm button).
+      #   "2" Level-2: click confirm, advance to payment-selection page, exit.
+      #   ""  off:     full automation — bot commits the order.
+      # Override per-run: `docker compose exec -e HUNTER_DRY_RUN=2 hunter ...`
       HUNTER_DRY_RUN: "${HUNTER_DRY_RUN:-1}"
+      # Persistent Chrome profile so login cookies survive between runs.
+      # Profile lives in the hunter_userdata named volume at
+      # /app/src/userdata/chrome_profile — login once, skip login forever.
+      HUNTER_PERSIST_PROFILE: "${HUNTER_PERSIST_PROFILE:-1}"
     volumes:
       # Live source mount — edit on host, run inside container.
       - ./src:/app/src
+      - ./tools:/app/tools
       - ./guide:/app/guide:ro
       - ./docs:/app/docs:ro
+      # Dry-run proof artifacts (screenshots, HTML snapshots) land here so
+      # they're directly visible on the host without docker cp.
+      - ./artifacts:/app/artifacts
       # Persist Chrome-for-Testing downloads + user config so re-creating the
       # container doesn't re-download Chrome or wipe your settings.json.
       - hunter_webdriver:/app/src/webdriver
